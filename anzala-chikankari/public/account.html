@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My Account | Anzala Chikankari</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=Montserrat:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="headerMount"></div>
+
+<section class="section container">
+  <h1 class="section-title" style="font-size:32px;text-align:left;">My Account</h1>
+  <div id="guestBox" style="display:none;">
+    <p>Please log in to view your account, or track an order below.</p>
+    <button class="btn btn-dark" onclick="openAuthModal()">Log In / Sign Up</button>
+    <div class="form-card" style="max-width:420px;margin-top:24px;">
+      <h3 style="margin-top:0;">Track an Order</h3>
+      <div class="form-row"><label>Order Number</label><input id="trackOrderNo" placeholder="e.g. AZ26..."></div>
+      <div class="form-row"><label>Email used at checkout</label><input id="trackEmail" type="email"></div>
+      <button class="btn btn-outline btn-block" id="trackBtn">Track Order</button>
+      <div id="trackResult" style="margin-top:16px;"></div>
+    </div>
+  </div>
+
+  <div id="accountLayout" class="account-layout" style="display:none;">
+    <div class="account-nav">
+      <button data-tab="orders">📦 My Orders</button>
+      <button data-tab="bookings">📅 My Bookings</button>
+      <button data-tab="wishlist">♥ Wishlist</button>
+      <button data-tab="profile">👤 Profile</button>
+      <button data-tab="logout">Log Out</button>
+    </div>
+    <div id="tabContent"></div>
+  </div>
+</section>
+
+<div id="footerMount"></div>
+<script src="/js/app.js"></script>
+<script>
+async function init() {
+  await mountChrome('shop');
+  if (!Auth.user) {
+    document.getElementById('guestBox').style.display = 'block';
+    document.getElementById('trackBtn').addEventListener('click', trackOrder);
+    const orderNo = qs('order');
+    if (orderNo) document.getElementById('trackOrderNo').value = orderNo;
+    return;
+  }
+  document.getElementById('accountLayout').style.display = 'grid';
+  document.querySelectorAll('.account-nav button').forEach(btn => btn.addEventListener('click', () => selectTab(btn.dataset.tab)));
+  selectTab(qs('tab') || 'orders');
+}
+
+async function trackOrder() {
+  const no = document.getElementById('trackOrderNo').value.trim();
+  const email = document.getElementById('trackEmail').value.trim();
+  const box = document.getElementById('trackResult');
+  if (!no || !email) { box.innerHTML = '<p class="msg-error">Please enter both order number and email.</p>'; return; }
+  try {
+    const order = await api.get(`/orders/${no}?email=${encodeURIComponent(email)}`);
+    box.innerHTML = orderCard(order);
+  } catch (e) { box.innerHTML = `<p class="msg-error">${e.message}</p>`; }
+}
+
+async function selectTab(tab) {
+  document.querySelectorAll('.account-nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  if (tab === 'logout') { await Auth.logout(); window.location.href = '/'; return; }
+  const el = document.getElementById('tabContent');
+  el.innerHTML = '<p style="color:#999">Loading…</p>';
+
+  if (tab === 'orders') {
+    const orders = await api.get('/orders');
+    el.innerHTML = orders.length ? orders.map(orderCard).join('') : '<div class="empty-state"><p>No orders yet.</p><a class="btn btn-dark" href="/shop.html">Start Shopping</a></div>';
+    el.querySelectorAll('[data-cancel]').forEach(btn => btn.addEventListener('click', async () => {
+      if (!confirm('Cancel this order?')) return;
+      try { await api.post(`/orders/${btn.dataset.cancel}/cancel`); toast('Order cancelled'); selectTab('orders'); }
+      catch (e) { toast(e.message, true); }
+    }));
+  }
+
+  if (tab === 'bookings') {
+    const bookings = await api.get('/bookings');
+    el.innerHTML = bookings.length ? bookings.map(b => `
+      <div class="order-card">
+        <div class="order-card-head">
+          <div><strong>${b.service_name}</strong><br><span style="font-size:12px;color:#999;">${b.booking_no}</span></div>
+          <span class="status-pill status-${b.status}">${b.status}</span>
+        </div>
+        <p style="margin:0 0 10px;font-size:14px;">📅 ${b.date} at ${b.time}</p>
+        ${['pending','confirmed'].includes(b.status) ? `<button class="btn btn-outline btn-sm" data-cancel-booking="${b.booking_no}">Cancel Appointment</button>` : ''}
+      </div>`).join('') : '<div class="empty-state"><p>No bookings yet.</p><a class="btn btn-dark" href="/booking.html">Book an Appointment</a></div>';
+    el.querySelectorAll('[data-cancel-booking]').forEach(btn => btn.addEventListener('click', async () => {
+      if (!confirm('Cancel this appointment?')) return;
+      try { await api.post(`/bookings/${btn.dataset.cancelBooking}/cancel`); toast('Appointment cancelled'); selectTab('bookings'); }
+      catch (e) { toast(e.message, true); }
+    }));
+  }
+
+  if (tab === 'wishlist') {
+    const items = await api.get('/wishlist');
+    el.innerHTML = `<div class="product-grid">${items.length ? items.map(productCard).join('') : ''}</div>` +
+      (items.length ? '' : '<div class="empty-state"><p>Your wishlist is empty.</p></div>');
+    wireProductCards();
+  }
+
+  if (tab === 'profile') {
+    const u = Auth.user;
+    el.innerHTML = `
+      <div class="form-card" style="max-width:460px;">
+        <h3 style="margin-top:0;">Profile Details</h3>
+        <form id="profileForm">
+          <div class="form-row"><label>Name</label><input name="name" value="${esc(u.name)}" required></div>
+          <div class="form-row"><label>Email</label><input value="${esc(u.email)}" disabled></div>
+          <div class="form-row"><label>Phone</label><input name="phone" value="${esc(u.phone || '')}"></div>
+          <button class="btn btn-dark" type="submit">Save Changes</button>
+        </form>
+      </div>
+      <div class="form-card" style="max-width:460px;margin-top:20px;">
+        <h3 style="margin-top:0;">Change Password</h3>
+        <form id="passwordForm">
+          <div class="form-row"><label>Current Password</label><input type="password" name="current_password" required></div>
+          <div class="form-row"><label>New Password</label><input type="password" name="new_password" minlength="8" required></div>
+          <p class="field-error" id="pwError"></p>
+          <button class="btn btn-dark" type="submit">Update Password</button>
+        </form>
+      </div>`;
+    document.getElementById('profileForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      Auth.user = await api.put('/account', { name: f.get('name'), phone: f.get('phone') });
+      toast('Profile updated');
+    });
+    document.getElementById('passwordForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      try { await api.put('/account/password', { current_password: f.get('current_password'), new_password: f.get('new_password') }); toast('Password updated'); e.target.reset(); }
+      catch (err) { document.getElementById('pwError').textContent = err.message; }
+    });
+  }
+}
+
+function orderCard(o) {
+  return `
+    <div class="order-card">
+      <div class="order-card-head">
+        <div><strong>${o.order_no}</strong><br><span style="font-size:12px;color:#999;">${new Date(o.created_at).toLocaleDateString('en-IN', { day:'numeric', month:'short', year:'numeric' })}</span></div>
+        <span class="status-pill status-${o.status}">${o.status}</span>
+      </div>
+      ${o.items.map(it => `<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;"><span>${esc(it.name)} ${it.size ? `(${esc(it.size)})` : ''} × ${it.qty}</span><span>${money(it.price * it.qty)}</span></div>`).join('')}
+      <div style="display:flex;justify-content:space-between;margin-top:10px;padding-top:10px;border-top:1px solid #eee;">
+        <strong>Total: ${money(o.total)}</strong>
+        <span class="status-pill status-${o.payment_status}">${o.payment_status}</span>
+      </div>
+      ${o.tracking_no ? `<p style="font-size:12px;color:#999;margin:8px 0 0;">Tracking No: ${o.tracking_no}</p>` : ''}
+      ${['placed','confirmed'].includes(o.status) ? `<button class="btn btn-outline btn-sm" style="margin-top:12px;" data-cancel="${o.order_no}">Cancel Order</button>` : ''}
+    </div>`;
+}
+
+init();
+</script>
+</body>
+</html>

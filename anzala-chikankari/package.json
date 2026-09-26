@@ -1,0 +1,21 @@
+{
+  "name": "anzala-chikankari",
+  "version": "1.0.0",
+  "description": "Anzala Chikankari - e-commerce store, booking engine and admin panel",
+  "main": "server.js",
+  "private": true,
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "node --no-warnings=ExperimentalWarning server.js",
+    "dev": "node --no-warnings=ExperimentalWarning --watch server.js",
+    "seed": "node --no-warnings=ExperimentalWarning lib/db.js --reset",
+    "test": "node --no-warnings=ExperimentalWarning --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "express": "^4.21.2",
+    "multer": "^2.4.0"
+  }
+}

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin | Anzala Chikankari</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/admin/style.css">
+</head>
+<body>
+
+<div id="loginScreen" class="login-wrap" style="display:none;">
+  <div class="login-box">
+    <h1>ANZALA</h1>
+    <form id="loginForm">
+      <div class="field"><label>Email</label><input type="email" name="email" required></div>
+      <div class="field"><label>Password</label><input type="password" name="password" required></div>
+      <p class="field-error" id="loginError"></p>
+      <button class="btn btn-gold" style="width:100%;justify-content:center;" type="submit">Log In</button>
+    </form>
+  </div>
+</div>
+
+<div id="appShell" class="app" style="display:none;">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">ANZALA</div>
+    <nav id="sidebarNav"></nav>
+    <div class="foot">
+      Signed in as <strong id="adminName"></strong><br>
+      <button id="logoutBtn">Log out</button>
+    </div>
+  </aside>
+  <div class="main">
+    <div class="topbar">
+      <button class="btn btn-outline btn-sm" id="menuToggle" style="display:none;">☰</button>
+      <h1 id="pageTitle">Dashboard</h1>
+      <a class="btn btn-outline btn-sm" href="/" target="_blank">View Store ↗</a>
+    </div>
+    <div class="content" id="content"></div>
+  </div>
+</div>
+
+<div id="adminToast"></div>
+<script src="/admin/app.js"></script>
+</body>
+</html>

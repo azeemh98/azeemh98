@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Anzala Chikankari | Luxury Lucknowi Fashion</title>
+<meta name="description" content="Handcrafted chikankari kurtis, sarees, suits and bridal wear from the heart of Lucknow.">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=Montserrat:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="headerMount"></div>
+
+<section class="hero">
+  <div>
+    <h1>The Art Of Chikankari</h1>
+    <p>Handcrafted Luxury From The Heart Of Lucknow</p>
+    <div class="hero-actions">
+      <a href="/shop.html" class="btn btn-primary">Explore Collection</a>
+      <a href="/booking.html" class="btn btn-outline" style="color:#fff;border-color:#fff;">Book an Appointment</a>
+    </div>
+  </div>
+</section>
+
+<section class="section container">
+  <h2 class="section-title">Shop by Category</h2>
+  <p class="section-sub">Every piece hand-embroidered by master artisans</p>
+  <div class="categories" id="categories"></div>
+</section>
+
+<section class="section container">
+  <h2 class="section-title">Featured Collection</h2>
+  <p class="section-sub">This season's most-loved pieces</p>
+  <div class="product-grid" id="featured"></div>
+</section>
+
+<section class="section" style="background:#fff;">
+  <div class="container" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:30px;text-align:center;">
+    <div><div style="font-size:34px;">🧵</div><h3 style="margin:10px 0 6px;font-size:17px;">100% Handcrafted</h3><p style="color:#6b6558;font-size:13px;">Every stitch done by hand by Lucknow's finest artisans.</p></div>
+    <div><div style="font-size:34px;">🚚</div><h3 style="margin:10px 0 6px;font-size:17px;">Pan-India Delivery</h3><p style="color:#6b6558;font-size:13px;">Free shipping above ₹2,999. Cash on delivery available.</p></div>
+    <div><div style="font-size:34px;">📅</div><h3 style="margin:10px 0 6px;font-size:17px;">Book an Appointment</h3><p style="color:#6b6558;font-size:13px;">Visit our Chowk boutique or a video-call fitting session.</p></div>
+    <div><div style="font-size:34px;">↩️</div><h3 style="margin:10px 0 6px;font-size:17px;">Easy Returns</h3><p style="color:#6b6558;font-size:13px;">7-day easy exchange on all ready-to-wear pieces.</p></div>
+  </div>
+</section>
+
+<div id="footerMount"></div>
+
+<script src="/js/app.js"></script>
+<script>
+async function loadHome() {
+  await mountChrome('home');
+  const cats = await api.get('/categories');
+  document.getElementById('categories').innerHTML = cats.map(c => `
+    <a class="category-card" href="/shop.html?category=${c.slug}">
+      <img src="${esc(c.image || '')}" alt="${esc(c.name)}" loading="lazy">
+      <span>${esc(c.name)}</span>
+    </a>`).join('');
+
+  const products = await api.get('/products?featured=1');
+  document.getElementById('featured').innerHTML = products.length
+    ? products.map(productCard).join('')
+    : '<p class="empty-state">No featured products yet.</p>';
+  wireProductCards();
+}
+loadHome();
+</script>
+</body>
+</html>
