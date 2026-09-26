@@ -1,23 +1,26 @@
-// Smoke tests for the storefront + admin API, run against an in-memory database.
+// Smoke tests for the storefront + admin API, run against a real Postgres database (set TEST_DATABASE_URL,
+// or DATABASE_URL, to a disposable database — every table is dropped and recreated on each run).
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const express = require('express');
 const cookieParser = require('cookie-parser');
+const { Pool } = require('pg');
 
-process.env.DB_FILE = ':memory:';
+process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL
+  || 'postgresql://postgres:localdevpass@127.0.0.1:5432/anzala_test';
 process.env.ADMIN_EMAIL = 'admin@test.local';
 process.env.ADMIN_PASSWORD = 'AdminPass123';
 
-const { open, seed } = require('../lib/db');
+const { db, pool, seed } = require('../lib/db');
 const { loadUser, requireAdmin } = require('../lib/auth');
 const { HttpError } = require('../lib/logic');
 const storeRoutes = require('../routes/store');
 const adminRoutes = require('../routes/admin');
 
-let server; let base;
+let server; let base; let resetPool;
 
-function buildApp(db) {
+function buildApp() {
   const app = express();
   app.use(express.json());
   app.use(cookieParser());
@@ -32,14 +35,18 @@ function buildApp(db) {
 }
 
 before(async () => {
-  const db = open(':memory:');
-  seed(db);
-  const app = buildApp(db);
+  resetPool = new Pool({ connectionString: process.env.DATABASE_URL });
+  await resetPool.query(`
+    drop table if exists messages, blocked_dates, settings, bookings, services, order_items, orders,
+      coupons, wishlist, reviews, products, categories, sessions, users cascade;
+  `);
+  await seed();
+  const app = buildApp();
   server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, resolve));
   base = `http://127.0.0.1:${server.address().port}`;
 });
-after(() => server.close());
+after(async () => { await new Promise((r) => server.close(r)); await resetPool.end(); await pool.end(); });
 
 // Minimal cookie-jar fetch wrapper so we can carry a session between calls per test.
 function client() {
@@ -103,8 +110,8 @@ test('register, order placement, stock decrement and self-cancel', async () => {
   assert.equal(order.status, 201);
   assert.ok(order.data.order_no.startsWith('AZ'));
 
-  const after = await req('GET', `/api/products/${target.slug}`);
-  assert.equal(after.data.stock, target.stock - 1);
+  const after1 = await req('GET', `/api/products/${target.slug}`);
+  assert.equal(after1.data.stock, target.stock - 1);
 
   const mine = await req('GET', '/api/orders');
   assert.equal(mine.data.length, 1);

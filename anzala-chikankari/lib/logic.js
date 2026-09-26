@@ -83,7 +83,7 @@ function parseProduct(row) {
   if (!row) return row;
   return {
     ...row,
-    images: JSON.parse(row.images || '[]'),
+    images: typeof row.images === 'string' ? JSON.parse(row.images) : (row.images || []),
     sizes: row.sizes ? row.sizes.split(',').map((s) => s.trim()).filter(Boolean) : [],
     featured: !!row.featured,
     active: !!row.active,
@@ -92,28 +92,27 @@ function parseProduct(row) {
 
 // ---------- cart pricing (always computed on the server) ----------
 
-function findCoupon(db, code, subtotal) {
+async function findCoupon(db, code, subtotal) {
   if (!code) return { coupon: null, error: null };
-  const c = db.prepare('SELECT * FROM coupons WHERE code = ?').get(String(code).trim());
+  const c = await db.get('SELECT * FROM coupons WHERE code = ?', [String(code).trim()]);
   const today = nowLocal().date;
   if (!c || !c.active) return { coupon: null, error: 'This coupon code is not valid.' };
-  if (c.expires_at && c.expires_at < today) return { coupon: null, error: 'This coupon has expired.' };
+  if (c.expires_at && String(c.expires_at).slice(0, 10) < today) return { coupon: null, error: 'This coupon has expired.' };
   if (c.max_uses != null && c.used >= c.max_uses) return { coupon: null, error: 'This coupon has reached its usage limit.' };
   if (subtotal < c.min_order) return { coupon: null, error: `Add items worth ₹${c.min_order - subtotal} more to use ${c.code}.` };
   return { coupon: c, error: null };
 }
 
-function quote(db, rawItems, couponCode) {
+async function quote(db, rawItems, couponCode) {
   if (!Array.isArray(rawItems)) throw new HttpError(400, 'Cart items are missing.');
   if (rawItems.length > 50) throw new HttpError(400, 'Too many items in cart.');
-  const getProduct = db.prepare('SELECT * FROM products WHERE id = ?');
-  const settings = getSettings(db);
+  const settings = await getSettings(db);
 
   const lines = [];
   const errors = [];
   const qtyByProduct = {};
   for (const raw of rawItems) {
-    const product = parseProduct(getProduct.get(Number(raw.product_id)));
+    const product = parseProduct(await db.get('SELECT * FROM products WHERE id = ?', [Number(raw.product_id)]));
     const qty = Number(raw.qty);
     if (!product || !product.active) { errors.push('An item in your bag is no longer available and was skipped.'); continue; }
     if (!Number.isInteger(qty) || qty < 1 || qty > 10) { errors.push(`Invalid quantity for ${product.name}.`); continue; }
@@ -135,7 +134,7 @@ function quote(db, rawItems, couponCode) {
   }
 
   const subtotal = lines.reduce((s, l) => s + l.line_total, 0);
-  const { coupon, error: couponError } = findCoupon(db, couponCode, subtotal);
+  const { coupon, error: couponError } = await findCoupon(db, couponCode, subtotal);
   let discount = 0;
   if (coupon) discount = coupon.type === 'percent' ? Math.floor((subtotal * coupon.value) / 100) : Math.min(coupon.value, subtotal);
   const afterDiscount = subtotal - discount;
@@ -151,7 +150,8 @@ function quote(db, rawItems, couponCode) {
 
 // ---------- booking engine ----------
 
-function bookingDayStatus(db, date, settings = getSettings(db)) {
+async function bookingDayStatus(db, date, settings) {
+  settings = settings || await getSettings(db);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || Number.isNaN(Date.parse(`${date}T00:00:00Z`))) {
     return { open: false, reason: 'Invalid date.' };
   }
@@ -163,16 +163,16 @@ function bookingDayStatus(db, date, settings = getSettings(db)) {
   const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
   const closed = String(settings.booking_closed_weekdays || '').split(',').filter((x) => x !== '').map(Number);
   if (closed.includes(weekday)) return { open: false, reason: 'The boutique is closed on this day.' };
-  const blocked = db.prepare('SELECT reason FROM blocked_dates WHERE date = ?').get(date);
+  const blocked = await db.get('SELECT reason FROM blocked_dates WHERE date = ?', [date]);
   if (blocked) return { open: false, reason: blocked.reason || 'No appointments available on this date.' };
   return { open: true };
 }
 
-function availableSlots(db, date, serviceId) {
-  const settings = getSettings(db);
-  const service = db.prepare('SELECT * FROM services WHERE id = ? AND active = 1').get(Number(serviceId));
+async function availableSlots(db, date, serviceId) {
+  const settings = await getSettings(db);
+  const service = await db.get('SELECT * FROM services WHERE id = ? AND active = true', [Number(serviceId)]);
   if (!service) throw new HttpError(404, 'Service not found.');
-  const day = bookingDayStatus(db, date, settings);
+  const day = await bookingDayStatus(db, date, settings);
   if (!day.open) return { date, service_id: service.id, open: false, reason: day.reason, slots: [] };
 
   const open = toMin(settings.booking_open);
@@ -181,9 +181,11 @@ function availableSlots(db, date, serviceId) {
   const capacity = Number(settings.booking_slot_capacity) || 1;
   const now = nowLocal();
 
-  const existing = db.prepare(`SELECT b.time, s.duration_min FROM bookings b JOIN services s ON s.id = b.service_id
-    WHERE b.date = ? AND b.status != 'cancelled'`).all(date)
-    .map((b) => ({ start: toMin(b.time), end: toMin(b.time) + b.duration_min }));
+  const existingRows = await db.all(
+    `SELECT b.time, s.duration_min FROM bookings b JOIN services s ON s.id = b.service_id
+     WHERE b.date = ? AND b.status != 'cancelled'`, [date],
+  );
+  const existing = existingRows.map((b) => ({ start: toMin(b.time), end: toMin(b.time) + b.duration_min }));
 
   const slots = [];
   for (let start = open; start + service.duration_min <= close; start += step) {

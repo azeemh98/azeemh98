@@ -1,167 +1,210 @@
-// SQLite database: schema, default settings and seed data.
-// Uses Node's built-in `node:sqlite` so there is no native dependency to compile.
-const fs = require('node:fs');
-const path = require('node:path');
-const { DatabaseSync } = require('node:sqlite');
+// Postgres (Supabase) database layer: connection pool, a thin query helper that keeps the rest of the
+// codebase reading like plain "?"-placeholder SQL, transactions, settings and seed data.
+const { Pool } = require('pg');
 const { hashPassword } = require('./auth');
 
-const DB_FILE = process.env.DB_FILE || path.join(__dirname, '..', 'data', 'anzala.db');
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.PGSSLMODE === 'disable' ? false : { rejectUnauthorized: false },
+  max: Number(process.env.PG_POOL_MAX) || 10,
+});
+pool.on('error', (err) => console.error('[db] idle client error', err)); // a dropped idle connection must not crash the process
+
+// Converts the app's SQLite-style "?" placeholders into Postgres's "$1,$2,..." so every call site can stay
+// written as plain, readable SQL instead of juggling two placeholder conventions.
+function toPg(sql) {
+  let i = 0;
+  return sql.replace(/\?/g, () => `$${++i}`);
+}
+
+// Wraps either the pool or a single checked-out client behind the same small async API, so route code and
+// business logic never need to know whether they're running inside a transaction.
+// `isTx` marks a client-backed wrapper already inside a transaction, so a nested `.tx()` call (e.g. shared
+// helpers like cancelOrder that may run standalone or from within a larger transaction) reuses the same
+// client/connection instead of opening a second one and deadlocking against its own uncommitted locks.
+function wrap(queryable, isTx = false) {
+  const self = {
+    async get(sql, params = []) { const r = await queryable.query(toPg(sql), params); return r.rows[0]; },
+    async all(sql, params = []) { const r = await queryable.query(toPg(sql), params); return r.rows; },
+    async run(sql, params = []) { const r = await queryable.query(toPg(sql), params); return { changes: r.rowCount, rows: r.rows }; },
+    async tx(fn) {
+      if (isTx) return fn(self); // already inside a transaction — just reuse it
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const result = await fn(wrap(client, true));
+        await client.query('COMMIT');
+        return result;
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    },
+  };
+  return self;
+}
+
+const db = wrap(pool);
 
 const SCHEMA = `
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  email TEXT NOT NULL UNIQUE COLLATE NOCASE,
-  phone TEXT,
-  password_hash TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'customer' CHECK (role IN ('customer','admin')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+create extension if not exists citext;
+
+create table if not exists users (
+  id integer generated always as identity primary key,
+  name text not null,
+  email citext not null unique,
+  phone text,
+  password_hash text not null,
+  role text not null default 'customer' check (role in ('customer','admin')),
+  created_at timestamptz not null default now()
 );
 
-CREATE TABLE IF NOT EXISTS sessions (
-  token TEXT PRIMARY KEY,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  expires_at TEXT NOT NULL
+create table if not exists sessions (
+  token text primary key,
+  user_id integer not null references users(id) on delete cascade,
+  expires_at timestamptz not null
 );
 
-CREATE TABLE IF NOT EXISTS categories (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  slug TEXT NOT NULL UNIQUE,
-  image TEXT,
-  sort_order INTEGER NOT NULL DEFAULT 0
+create table if not exists categories (
+  id integer generated always as identity primary key,
+  name text not null,
+  slug text not null unique,
+  image text,
+  sort_order integer not null default 0
 );
 
-CREATE TABLE IF NOT EXISTS products (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  slug TEXT NOT NULL UNIQUE,
-  category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
-  description TEXT NOT NULL DEFAULT '',
-  fabric TEXT NOT NULL DEFAULT '',
-  price INTEGER NOT NULL CHECK (price >= 0),
-  compare_price INTEGER,
-  stock INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0),
-  sizes TEXT NOT NULL DEFAULT '',
-  images TEXT NOT NULL DEFAULT '[]',
-  featured INTEGER NOT NULL DEFAULT 0,
-  active INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+create table if not exists products (
+  id integer generated always as identity primary key,
+  name text not null,
+  slug text not null unique,
+  category_id integer references categories(id) on delete set null,
+  description text not null default '',
+  fabric text not null default '',
+  price integer not null check (price >= 0),
+  compare_price integer,
+  stock integer not null default 0 check (stock >= 0),
+  sizes text not null default '',
+  images jsonb not null default '[]'::jsonb,
+  featured boolean not null default false,
+  active boolean not null default true,
+  created_at timestamptz not null default now()
 );
 
-CREATE TABLE IF NOT EXISTS reviews (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
-  comment TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE (product_id, user_id)
+create table if not exists reviews (
+  id integer generated always as identity primary key,
+  product_id integer not null references products(id) on delete cascade,
+  user_id integer not null references users(id) on delete cascade,
+  rating integer not null check (rating between 1 and 5),
+  comment text not null default '',
+  created_at timestamptz not null default now(),
+  unique (product_id, user_id)
 );
 
-CREATE TABLE IF NOT EXISTS wishlist (
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-  PRIMARY KEY (user_id, product_id)
+create table if not exists wishlist (
+  user_id integer not null references users(id) on delete cascade,
+  product_id integer not null references products(id) on delete cascade,
+  primary key (user_id, product_id)
 );
 
-CREATE TABLE IF NOT EXISTS coupons (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  code TEXT NOT NULL UNIQUE COLLATE NOCASE,
-  type TEXT NOT NULL CHECK (type IN ('percent','flat')),
-  value INTEGER NOT NULL CHECK (value > 0),
-  min_order INTEGER NOT NULL DEFAULT 0,
-  max_uses INTEGER,
-  used INTEGER NOT NULL DEFAULT 0,
-  expires_at TEXT,
-  active INTEGER NOT NULL DEFAULT 1
+create table if not exists coupons (
+  id integer generated always as identity primary key,
+  code citext not null unique,
+  type text not null check (type in ('percent','flat')),
+  value integer not null check (value > 0),
+  min_order integer not null default 0,
+  max_uses integer,
+  used integer not null default 0,
+  expires_at date,
+  active boolean not null default true
 );
 
-CREATE TABLE IF NOT EXISTS orders (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  order_no TEXT NOT NULL UNIQUE,
-  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  name TEXT NOT NULL,
-  email TEXT NOT NULL,
-  phone TEXT NOT NULL,
-  address TEXT NOT NULL,
-  city TEXT NOT NULL,
-  state TEXT NOT NULL,
-  pincode TEXT NOT NULL,
-  subtotal INTEGER NOT NULL,
-  discount INTEGER NOT NULL DEFAULT 0,
-  shipping INTEGER NOT NULL DEFAULT 0,
-  total INTEGER NOT NULL,
-  coupon_code TEXT,
-  payment_method TEXT NOT NULL CHECK (payment_method IN ('cod','upi')),
-  payment_status TEXT NOT NULL DEFAULT 'pending' CHECK (payment_status IN ('pending','paid','refunded')),
-  status TEXT NOT NULL DEFAULT 'placed'
-    CHECK (status IN ('placed','confirmed','packed','shipped','delivered','cancelled')),
-  tracking_no TEXT,
-  notes TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+create table if not exists orders (
+  id integer generated always as identity primary key,
+  order_no text not null unique,
+  user_id integer references users(id) on delete set null,
+  name text not null,
+  email text not null,
+  phone text not null,
+  address text not null,
+  city text not null,
+  state text not null,
+  pincode text not null,
+  subtotal integer not null,
+  discount integer not null default 0,
+  shipping integer not null default 0,
+  total integer not null,
+  coupon_code text,
+  payment_method text not null check (payment_method in ('cod','upi')),
+  payment_status text not null default 'pending' check (payment_status in ('pending','paid','refunded')),
+  status text not null default 'placed'
+    check (status in ('placed','confirmed','packed','shipped','delivered','cancelled')),
+  tracking_no text,
+  notes text,
+  created_at timestamptz not null default now()
 );
 
-CREATE TABLE IF NOT EXISTS order_items (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-  product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
-  name TEXT NOT NULL,
-  image TEXT,
-  size TEXT,
-  price INTEGER NOT NULL,
-  qty INTEGER NOT NULL CHECK (qty > 0)
+create table if not exists order_items (
+  id integer generated always as identity primary key,
+  order_id integer not null references orders(id) on delete cascade,
+  product_id integer references products(id) on delete set null,
+  name text not null,
+  image text,
+  size text,
+  price integer not null,
+  qty integer not null check (qty > 0)
 );
 
-CREATE TABLE IF NOT EXISTS services (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  description TEXT NOT NULL DEFAULT '',
-  duration_min INTEGER NOT NULL DEFAULT 60,
-  price INTEGER NOT NULL DEFAULT 0,
-  active INTEGER NOT NULL DEFAULT 1
+create table if not exists services (
+  id integer generated always as identity primary key,
+  name text not null,
+  description text not null default '',
+  duration_min integer not null default 60,
+  price integer not null default 0,
+  active boolean not null default true
 );
 
-CREATE TABLE IF NOT EXISTS bookings (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  booking_no TEXT NOT NULL UNIQUE,
-  service_id INTEGER NOT NULL REFERENCES services(id),
-  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  name TEXT NOT NULL,
-  email TEXT NOT NULL,
-  phone TEXT NOT NULL,
-  date TEXT NOT NULL,
-  time TEXT NOT NULL,
-  notes TEXT,
-  status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending','confirmed','completed','cancelled')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+create table if not exists bookings (
+  id integer generated always as identity primary key,
+  booking_no text not null unique,
+  service_id integer not null references services(id),
+  user_id integer references users(id) on delete set null,
+  name text not null,
+  email text not null,
+  phone text not null,
+  date date not null,
+  time text not null,
+  notes text,
+  status text not null default 'pending'
+    check (status in ('pending','confirmed','completed','cancelled')),
+  created_at timestamptz not null default now()
 );
 
-CREATE TABLE IF NOT EXISTS blocked_dates (
-  date TEXT PRIMARY KEY,
-  reason TEXT
+create table if not exists blocked_dates (
+  date date primary key,
+  reason text
 );
 
-CREATE TABLE IF NOT EXISTS settings (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
+create table if not exists settings (
+  key text primary key,
+  value text not null
 );
 
-CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  email TEXT NOT NULL,
-  phone TEXT,
-  message TEXT NOT NULL,
-  is_read INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+create table if not exists messages (
+  id integer generated always as identity primary key,
+  name text not null,
+  email text not null,
+  phone text,
+  message text not null,
+  is_read boolean not null default false,
+  created_at timestamptz not null default now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
-CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
-CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
-CREATE INDEX IF NOT EXISTS idx_bookings_date ON bookings(date, time);
+create index if not exists idx_products_category on products(category_id);
+create index if not exists idx_orders_user on orders(user_id);
+create index if not exists idx_orders_created on orders(created_at);
+create index if not exists idx_bookings_date on bookings(date, time);
 `;
 
 const DEFAULT_SETTINGS = {
@@ -222,79 +265,72 @@ const SEED_SERVICES = [
   ['Video Call Shopping', 'Shop live over a WhatsApp video call with a stylist from anywhere in the world.', 30, 0],
 ];
 
-function open(file = DB_FILE) {
-  if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
-  db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
-  db.exec(SCHEMA);
-  const insSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
-  for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) insSetting.run(k, v);
-  return db;
-}
-
-function transaction(db, fn) {
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    const result = fn();
-    db.exec('COMMIT');
-    return result;
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
-}
-
-function seed(db) {
-  const hasProducts = db.prepare('SELECT COUNT(*) AS n FROM products').get().n > 0;
-  const hasAdmin = db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").get().n > 0;
-
-  if (!hasAdmin) {
-    const email = process.env.ADMIN_EMAIL || 'admin@anzalachikankari.in';
-    const password = process.env.ADMIN_PASSWORD || 'ChangeMe@123';
-    db.prepare("INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, 'admin')")
-      .run('Store Admin', email, hashPassword(password));
-    if (!process.env.ADMIN_PASSWORD) {
-      console.log(`[seed] Admin created: ${email} / ${password}  <-- change this password after first login`);
-    }
-  }
-
-  if (hasProducts) return;
-  transaction(db, () => {
-    const insCat = db.prepare('INSERT INTO categories (name, slug, image, sort_order) VALUES (?, ?, ?, ?)');
-    SEED_CATEGORIES.forEach((c, i) => insCat.run(c.name, c.slug, c.image, i));
-    const catId = Object.fromEntries(db.prepare('SELECT id, slug FROM categories').all().map((r) => [r.slug, r.id]));
-
-    const insProd = db.prepare(`INSERT INTO products
-      (name, slug, category_id, description, fabric, price, compare_price, stock, sizes, images, featured)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    for (const [name, cat, price, compare, fabric, sizes, stock, featured, img, desc] of SEED_PRODUCTS) {
-      insProd.run(name, slugify(name), catId[cat], desc, fabric, price, compare, stock, sizes,
-        JSON.stringify([IMG(img)]), featured);
-    }
-
-    const insSvc = db.prepare('INSERT INTO services (name, description, duration_min, price) VALUES (?, ?, ?, ?)');
-    for (const s of SEED_SERVICES) insSvc.run(...s);
-
-    db.prepare("INSERT INTO coupons (code, type, value, min_order) VALUES ('WELCOME10', 'percent', 10, 1999)").run();
-    db.prepare("INSERT INTO coupons (code, type, value, min_order) VALUES ('FLAT500', 'flat', 500, 4999)").run();
-  });
-  console.log('[seed] Sample categories, products, services and coupons added.');
+async function migrate() {
+  await pool.query(SCHEMA);
+  const stmt = 'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING';
+  for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) await db.run(stmt, [k, v]);
 }
 
 function slugify(s) {
   return String(s).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
 }
 
-function getSettings(db) {
-  return Object.fromEntries(db.prepare('SELECT key, value FROM settings').all().map((r) => [r.key, r.value]));
+async function getSettings(dbLike = db) {
+  const rows = await dbLike.all('SELECT key, value FROM settings');
+  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
 }
 
-module.exports = { open, seed, transaction, slugify, getSettings, DEFAULT_SETTINGS, DB_FILE };
+async function seed() {
+  await migrate();
+  const hasAdmin = (await db.get("SELECT COUNT(*)::int AS n FROM users WHERE role = 'admin'")).n > 0;
+  if (!hasAdmin) {
+    const email = process.env.ADMIN_EMAIL || 'admin@anzalachikankari.in';
+    const password = process.env.ADMIN_PASSWORD || 'ChangeMe@123';
+    await db.run("INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, 'admin')",
+      ['Store Admin', email, hashPassword(password)]);
+    if (!process.env.ADMIN_PASSWORD) {
+      console.log(`[seed] Admin created: ${email} / ${password}  <-- change this password after first login`);
+    }
+  }
+
+  const hasProducts = (await db.get('SELECT COUNT(*)::int AS n FROM products')).n > 0;
+  if (hasProducts) return;
+
+  await db.tx(async (tdb) => {
+    for (let i = 0; i < SEED_CATEGORIES.length; i++) {
+      const c = SEED_CATEGORIES[i];
+      await tdb.run('INSERT INTO categories (name, slug, image, sort_order) VALUES (?, ?, ?, ?)', [c.name, c.slug, c.image, i]);
+    }
+    const catRows = await tdb.all('SELECT id, slug FROM categories');
+    const catId = Object.fromEntries(catRows.map((r) => [r.slug, r.id]));
+
+    for (const [name, cat, price, compare, fabric, sizes, stock, featured, img, desc] of SEED_PRODUCTS) {
+      await tdb.run(`INSERT INTO products
+        (name, slug, category_id, description, fabric, price, compare_price, stock, sizes, images, featured)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [name, slugify(name), catId[cat], desc, fabric, price, compare, stock, sizes, JSON.stringify([IMG(img)]), !!featured]);
+    }
+
+    for (const s of SEED_SERVICES) {
+      await tdb.run('INSERT INTO services (name, description, duration_min, price) VALUES (?, ?, ?, ?)', s);
+    }
+
+    await tdb.run("INSERT INTO coupons (code, type, value, min_order) VALUES ('WELCOME10', 'percent', 10, 1999)");
+    await tdb.run("INSERT INTO coupons (code, type, value, min_order) VALUES ('FLAT500', 'flat', 500, 4999)");
+  });
+  console.log('[seed] Sample categories, products, services and coupons added.');
+}
+
+module.exports = { pool, db, migrate, seed, slugify, getSettings, DEFAULT_SETTINGS };
 
 if (require.main === module && process.argv.includes('--reset')) {
-  for (const f of [DB_FILE, `${DB_FILE}-wal`, `${DB_FILE}-shm`]) fs.rmSync(f, { force: true });
-  const db = open();
-  seed(db);
-  db.close();
-  console.log(`[seed] Fresh database written to ${DB_FILE}`);
+  (async () => {
+    await pool.query(`
+      drop table if exists messages, blocked_dates, settings, bookings, services, order_items, orders,
+        coupons, wishlist, reviews, products, categories, sessions, users cascade;
+    `);
+    await seed();
+    console.log('[seed] Database reset and reseeded.');
+    await pool.end();
+  })().catch((err) => { console.error(err); process.exit(1); });
 }

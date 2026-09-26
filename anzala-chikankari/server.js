@@ -1,17 +1,15 @@
 // Anzala Chikankari — e-commerce store, booking engine and admin panel.
-// A single Express app serving the JSON API and the static storefront/admin frontends.
+// A single Express app serving the JSON API and the static storefront/admin frontends, backed by Postgres.
 const express = require('express');
 const path = require('node:path');
-const { open, seed } = require('./lib/db');
 const cookieParser = require('cookie-parser');
+const { db, seed } = require('./lib/db');
 const { loadUser, requireAdmin } = require('./lib/auth');
 const { HttpError } = require('./lib/logic');
 const storeRoutes = require('./routes/store');
 const adminRoutes = require('./routes/admin');
 
 const PORT = process.env.PORT || 3000;
-const db = open();
-seed(db);
 
 const app = express();
 app.disable('x-powered-by');
@@ -62,8 +60,13 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: 'Something went wrong on our end. Please try again.' });
 });
 
-app.listen(PORT, () => {
-  console.log(`Anzala Chikankari running on http://localhost:${PORT}`);
-});
+async function start() {
+  await seed(); // runs schema migrations + first-run admin/sample data, safe to call on every boot
+  app.listen(PORT, () => console.log(`Anzala Chikankari running on http://localhost:${PORT}`));
+}
+
+if (require.main === module) {
+  start().catch((err) => { console.error('Failed to start:', err); process.exit(1); });
+}
 
 module.exports = app;

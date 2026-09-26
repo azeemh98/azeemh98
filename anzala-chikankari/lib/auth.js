@@ -18,19 +18,10 @@ function verifyPassword(password, stored) {
   return known.length === test.length && crypto.timingSafeEqual(known, test);
 }
 
-function parseCookies(header = '') {
-  const out = {};
-  for (const part of header.split(';')) {
-    const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
-  }
-  return out;
-}
-
-function createSession(db, userId) {
+async function createSession(db, userId) {
   const token = crypto.randomBytes(32).toString('hex');
   const expires = new Date(Date.now() + SESSION_DAYS * 864e5).toISOString();
-  db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expires);
+  await db.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', [token, userId, expires]);
   return token;
 }
 
@@ -47,14 +38,20 @@ function setSessionCookie(res, token) {
 // Express middleware: attaches req.user when a valid session cookie is present.
 // Requires `cookie-parser` to already have populated req.cookies.
 function loadUser(db) {
-  const find = db.prepare(`SELECT u.id, u.name, u.email, u.phone, u.role
-    FROM sessions s JOIN users u ON u.id = s.user_id
-    WHERE s.token = ? AND s.expires_at > ?`);
-  return (req, _res, next) => {
-    const token = req.cookies?.[SESSION_COOKIE];
-    req.sessionToken = token || null;
-    req.user = token ? find.get(token, new Date().toISOString()) || null : null;
-    next();
+  return async (req, _res, next) => {
+    try {
+      const token = req.cookies?.[SESSION_COOKIE];
+      req.sessionToken = token || null;
+      req.user = token
+        ? (await db.get(
+            `SELECT u.id, u.name, u.email, u.phone, u.role
+             FROM sessions s JOIN users u ON u.id = s.user_id
+             WHERE s.token = ? AND s.expires_at > ?`,
+            [token, new Date().toISOString()],
+          )) || null
+        : null;
+      next();
+    } catch (err) { next(err); }
   };
 }
 
@@ -70,6 +67,6 @@ function requireAdmin(req, res, next) {
 }
 
 module.exports = {
-  SESSION_COOKIE, hashPassword, verifyPassword, parseCookies,
+  SESSION_COOKIE, hashPassword, verifyPassword,
   createSession, setSessionCookie, loadUser, requireUser, requireAdmin,
 };
