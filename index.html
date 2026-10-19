@@ -330,7 +330,7 @@ var list=$('#eventList'),tabs=$('#tabs'),tl=$('#tl');
 EVENTS.forEach(function(ev,i){
  var b=document.createElement('button');b.textContent=ev.tab;b.dataset.id=ev.id;
  b.onclick=function(){document.getElementById('ev-'+ev.id).scrollIntoView({behavior:'smooth'})};tabs.appendChild(b);
- var rows=ev.parts.map(function(p){return '<div class="ev-row"><small>'+(ev.parts.length>1?p.n:'Time')+'</small><span>'+p.t+(ev.parts.length>1?' <em>| '+p.v+'</em>':'')+'</span>'</div>'}).join('');
+ var rows=ev.parts.map(function(p){return '<div class="ev-row"><small>'+(ev.parts.length>1?p.n:'Time')+'</small><span>'+p.t+(ev.parts.length>1?' <em>| '+p.v+'</em>':'')+'</span></div>'}).join('');
  var cal=ev.parts.length>1?ev.parts.map(function(p){return '<a class="btn" target="_blank" rel="noopener" href="'+gcal(ev.title+' : '+p.n,p)+'">'+calIcon+p.n+'</a>'}).join(''):'<a class="btn fill" target="_blank" rel="noopener" href="'+gcal(ev.title,ev.parts[0])+'">'+calIcon+'Add to Calendar</a>';
  var art=document.createElement('article');art.className='event';art.id='ev-'+ev.id;
  art.innerHTML='<div class="ev-art reveal" data-zoom="'+ev.img+'"><span class="ev-num">0'+(i+1)+'</span><img loading="lazy" src="'+IMG+ev.img+'.jpg" alt="'+ev.title+' invitation"></div>'+
